@@ -65,7 +65,13 @@ const catalog = [
   { type: "comparator", name: "Comparator", value: "LM393", group: "Analog ICs", ref: "U", tag: "▷", detail: "Open-collector output" },
   { type: "timer", name: "555 timer", value: "NE555", group: "Analog ICs", ref: "U", tag: "555", detail: "Astable · monostable" },
   { type: "regulator", name: "Voltage regulator", value: "LM7805", group: "Analog ICs", ref: "U", tag: "5V", detail: "78xx · 79xx · LDO" },
-  { type: "logic", name: "Logic gate", value: "74HC00 · NAND", group: "Digital", ref: "U", tag: "&", detail: "TTL 74xx · CMOS 40xx" },
+  { type: "logic", name: "NAND gate", value: "74HC00 · NAND", group: "Digital", ref: "U", tag: "&", detail: "TTL 74xx · CMOS 40xx" },
+  { type: "logic", name: "Inverter", value: "74HC04 · NOT", group: "Digital", ref: "U", tag: "1", detail: "Schmitt trigger · 74HC14" },
+  { type: "logic", name: "D flip-flop", value: "74HC74 · DFF", group: "Digital", ref: "U", tag: "D", detail: "Edge triggered · set/reset" },
+  { type: "logic", name: "Counter", value: "4017 · decade", group: "Digital", ref: "U", tag: "10", detail: "Johnson counter · 4000 series" },
+  { type: "logic", name: "Shift register", value: "74HC595 · 8-bit", group: "Digital", ref: "U", tag: "595", detail: "Serial in · parallel out" },
+  { type: "logic", name: "Multiplexer", value: "74HC153 · 2:1", group: "Digital", ref: "U", tag: "MUX", detail: "Dual 4-channel selector" },
+  { type: "logic", name: "JK flip-flop", value: "74HC73 · JK", group: "Digital", ref: "U", tag: "JK", detail: "Toggle · divide by 2" },
   { type: "microcontroller", name: "Microcontroller", value: "ATmega328P", group: "Digital", ref: "U", tag: "µC", detail: "Arduino · PIC · 8051" },
   { type: "seven-segment", name: "7-segment display", value: "Common cathode", group: "Digital", ref: "DS", tag: "8", detail: "Decoded · raw segments" },
   { type: "switch", name: "SPST switch", value: "Open", group: "Switches & indicators", ref: "S", tag: "S", detail: "Interactive · momentary" },
@@ -522,12 +528,14 @@ export default function Workbench() {
   const [parameterTarget, setParameterTarget] = useState<string | undefined>(undefined);
   const [tool, setTool] = useState<ToolState>({ kind: "select" });
   const [selectedPartId, setSelectedPartId] = useState<string | null>("r1");
+  const [selectedWireId, setSelectedWireId] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [connectionStart, setConnectionStart] = useState<PinReference | null>(null);
   const [pointerWorld, setPointerWorld] = useState<Point | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [gridVisible, setGridVisible] = useState(true);
-  const [darkTheme, setDarkTheme] = useState(false);
+  const [darkTheme, setDarkTheme] = useState(true);
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("All components");
   const [expandedGroups, setExpandedGroups] = useState<string[]>(["Passive", "Sources"]);
@@ -667,11 +675,25 @@ export default function Workbench() {
         event.preventDefault();
         removeSelectedPart();
       }
+      if (!editing && (event.key === "Delete" || event.key === "Backspace") && selectedWireId) {
+        event.preventDefault();
+        removeSelectedWire();
+      }
       if (!editing && event.key === "Escape") {
         setTool({ kind: "select" });
         setConnectionStart(null);
         setActiveInstrument(null);
         setSelectedPartId(null);
+        setSelectedWireId(null);
+        setAnalysisMenuOpen(false);
+        setExportMenuOpen(false);
+        setProjectMenuOpen(false);
+      }
+      if (!editing && event.key === "/") {
+        event.preventDefault();
+        setSidebarTab("Library");
+        setShowLeftPanel(true);
+        searchInputRef.current?.focus();
       }
       if (!editing && event.key.toLowerCase() === "w") setTool({ kind: "wire" });
       if (!editing && event.key.toLowerCase() === "v") setTool({ kind: "select" });
@@ -692,6 +714,7 @@ export default function Workbench() {
   }), [document.connections, document.parts]);
 
   const selectedPart = document.parts.find((part) => part.id === selectedPartId) ?? null;
+  const selectedWire = document.connections.find((wire) => wire.id === selectedWireId) ?? null;
   const filteredComponents = catalog.filter((item) => {
     const matchesText = !search || `${item.name} ${item.value} ${item.group} ${item.detail}`.toLowerCase().includes(search.toLowerCase());
     const matchesGroup = activeCategory === "All components" || item.group === activeCategory;
@@ -710,7 +733,7 @@ export default function Workbench() {
         ? (20 * Math.log10(Math.max(Math.abs(result.outputVoltage), 1e-9))).toFixed(2)
         : (result.outputVoltage * (dmmMode.startsWith("AC") ? 1 / Math.sqrt(2) : 1)).toFixed(3);
   const dmmUnit = dmmMode.includes("Ω") ? "kΩ" : dmmMode.includes("A") ? "mA" : dmmMode.includes("dB") ? "dB" : "V";
-  const appClassName = `studio-shell${darkTheme ? " theme-dark" : ""}`;
+  const appClassName = `studio-shell${darkTheme ? "" : " theme-light"}`;
 
   const announce = useCallback((message: string) => setToast(message), []);
 
@@ -774,6 +797,15 @@ export default function Workbench() {
     announce(`${definition.name} bereit — ${created.ref} auf dem Schaltplan platziert`);
   }
 
+  function removeSelectedWire() {
+    if (!selectedWireId) return;
+    const wire = documentRef.current.connections.find((entry) => entry.id === selectedWireId);
+    if (!wire) return;
+    updateCircuit((current) => ({ ...current, connections: current.connections.filter((entry) => entry.id !== selectedWireId) }));
+    setSelectedWireId(null);
+    announce("Leitung entfernt · Netzwerk aktualisiert");
+  }
+
   function removeSelectedPart() {
     if (!selectedPartId) return;
     const selected = documentRef.current.parts.find((part) => part.id === selectedPartId);
@@ -814,7 +846,14 @@ export default function Workbench() {
     const target = event.target as Element;
     const pinElement = target.closest("[data-pin-id]");
     const partElement = target.closest("[data-part-id]");
+    const wireElement = target.closest("[data-wire-id]");
     const reference = pinElement ? referenceFromElement(pinElement) : null;
+
+    if (wireElement && tool.kind === "select" && !partElement) {
+      setSelectedWireId(wireElement.getAttribute("data-wire-id"));
+      setSelectedPartId(null);
+      return;
+    }
 
     if (reference && tool.kind === "wire") {
       if (!connectionStart) {
@@ -1270,8 +1309,8 @@ export default function Workbench() {
         <aside className={`library-sidebar${showLeftPanel ? "" : " sidebar-collapsed"}`}>
           <div className="sidebar-tabs"><button className={sidebarTab === "Library" ? "selected" : ""} onClick={() => setSidebarTab("Library")}><Icon name="component" size={14} />Library</button><button className={sidebarTab === "Project" ? "selected" : ""} onClick={() => setSidebarTab("Project")}><Icon name="layers" size={14} />Project</button><button className={sidebarTab === "Presets" ? "selected" : ""} onClick={() => setSidebarTab("Presets")}><Icon name="book" size={14} />Presets</button><button className="sidebar-collapse" onClick={() => setShowLeftPanel(false)} title="Seitenleiste schließen"><Icon name="chevronRight" size={14} /></button></div>
           {sidebarTab === "Library" ? <>
-            <div className="sidebar-section-heading"><div><span className="eyebrow">DESIGN LIBRARY</span><strong>Components</strong></div><button className="icon-button small" title="Bibliothekseinstellungen"><Icon name="sliders" size={14} /></button></div>
-            <label className="library-search"><Icon name="search" size={15} /><input placeholder="Search components…" value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>/</kbd></label>
+            <div className="sidebar-section-heading"><div><span className="eyebrow">DESIGN LIBRARY</span><strong>Components</strong></div></div>
+            <label className="library-search"><Icon name="search" size={15} /><input ref={searchInputRef} placeholder="Search components…" value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>/</kbd></label>
             <div className="category-chips"><button className={activeCategory === "All components" ? "active" : ""} onClick={() => setActiveCategory("All components")}>All <span>35</span></button><button className={activeCategory === "Passive" ? "active" : ""} onClick={() => setActiveCategory("Passive")}>Passive</button><button className={activeCategory === "Semiconductors" ? "active" : ""} onClick={() => setActiveCategory("Semiconductors")}>Semis</button></div>
             {!search && activeCategory === "All components" && <div className="quick-access"><div className="section-label">QUICK ACCESS <button className="text-button" onClick={() => setActiveCategory("All components")}>See all</button></div><div className="quick-grid">{recentTypes.slice(0, 4).map((type) => { const item = catalog.find((part) => part.type === type); if (!item) return null; return <button className="quick-part" key={type} onClick={() => startPlacement(item)} title={`Place ${item.name}`}><span className={`part-mini-icon mini-${item.type}`}>{item.tag}</span><span>{item.name}</span></button>; })}</div></div>}
             <div className="library-list">
@@ -1299,7 +1338,7 @@ export default function Workbench() {
               ))}
             </div>
             <div className="library-footnote"><span className="online-dot" />Presets werden live simuliert</div>
-          </div> : <div className="project-tree-panel"><div className="sidebar-section-heading"><div><span className="eyebrow">CURRENT DESIGN</span><strong>Project tree</strong></div><button className="icon-button small" onClick={() => setProjectMenuOpen(true)} title="Saved projects"><Icon name="folder" size={14} /></button></div><div className="tree-project-name"><Icon name="file" size={15} /><strong>{documentName}</strong><span className="tree-badge">.ms</span></div><div className="tree-section-label">SCHEMATICS <span>01</span></div><button className="tree-row active"><span className="tree-indicator" /><Icon name="component" size={14} /><span>Sheet 1 — Main circuit</span><span>⌘1</span></button><div className="tree-section-label">COMPONENTS <span>{document.parts.length}</span></div><div className="tree-component-list">{document.parts.map((part) => <button key={part.id} className={`tree-row${selectedPartId === part.id ? " active" : ""}`} onClick={() => setSelectedPartId(part.id)}><span className="tree-component-symbol">{catalog.find((item) => item.type === part.type)?.tag ?? "•"}</span><span>{part.ref}</span><small>{part.value}</small></button>)}</div><div className="tree-section-label">NETS <span>{new Set(document.connections.map((wire) => pinId(wire.from))).size}</span></div><button className="tree-row"><span className="net-color" /><span>0 · GND</span><small>Global ground</small></button><button className="tree-row"><span className="net-color signal" /><span>V(out)</span><small>{formatVoltage(result.outputVoltage)}</small></button><button className="tree-add-row" onClick={placeImportFile}><Icon name="plus" size={13} />Import a SPICE netlist</button></div>}
+          </div> : <div className="project-tree-panel"><div className="sidebar-section-heading"><div><span className="eyebrow">CURRENT DESIGN</span><strong>Project tree</strong></div><button className="icon-button small" onClick={() => setProjectMenuOpen(true)} title="Saved projects"><Icon name="folder" size={14} /></button></div><div className="tree-project-name"><Icon name="file" size={15} /><strong>{documentName}</strong><span className="tree-badge">.ms</span></div><div className="tree-section-label">SCHEMATICS <span>01</span></div><button className="tree-row active"><span className="tree-indicator" /><Icon name="component" size={14} /><span>Sheet 1 — Main circuit</span><span>⌘1</span></button><div className="tree-section-label">COMPONENTS <span>{document.parts.length}</span></div><div className="tree-component-list">{document.parts.map((part) => <button key={part.id} className={`tree-row${selectedPartId === part.id ? " active" : ""}`} onClick={() => setSelectedPartId(part.id)}><span className="tree-component-symbol">{catalog.find((item) => item.type === part.type)?.tag ?? "•"}</span><span>{part.ref}</span><small>{part.value}</small></button>)}</div><div className="tree-section-label">NETS <span>{new Set(document.connections.map((wire) => pinId(wire.from))).size}</span></div><div className="tree-row"><span className="net-color" /><span>0 · GND</span><small>Global ground</small></div><div className="tree-row"><span className="net-color signal" /><span>V(out)</span><small>{formatVoltage(result.outputVoltage)}</small></div><button className="tree-add-row" onClick={placeImportFile}><Icon name="plus" size={13} />Import a SPICE netlist</button></div>}
         </aside>
 
         <section className="editor-column">
@@ -1333,8 +1372,8 @@ export default function Workbench() {
               <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
                 {gridVisible && <><rect x="-600" y="-500" width="2600" height="1800" fill="url(#canvas-grid)" pointerEvents="none" /><rect x="-600" y="-500" width="2600" height="1800" fill="url(#canvas-major-grid)" pointerEvents="none" /></>}
                 {componentPaths.map(({ connection, points, d }) => <g key={connection.id}>
-                  <path d={d} className={`wire-hit-area${tool.kind === "wire" ? " wire-editable" : ""}`} fill="none" />
-                  <path d={d} className={`circuit-wire${isRunning ? " wire-live" : ""}`} fill="none" filter={isRunning ? "url(#wire-glow)" : undefined} />
+                  <path d={d} className={`wire-hit-area${tool.kind === "wire" ? " wire-editable" : ""}${selectedWireId === connection.id ? " wire-selected" : ""}`} fill="none" data-wire-id={connection.id} />
+                  <path d={d} className={`circuit-wire${isRunning ? " wire-live" : ""}${selectedWireId === connection.id ? " wire-selected" : ""}`} fill="none" filter={isRunning ? "url(#wire-glow)" : undefined} pointerEvents="none" />
                   {points.length > 1 && <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" className="wire-junction" />}
                 </g>)}
                 {connectionStart && pointerWorld && tool.kind === "wire" && <path d={pathFor(autoRoute(getPinPosition(document.parts.find((part) => part.id === connectionStart.partId) ?? document.parts[0], connectionStart.pin), pointerWorld, document.parts, connectionStart.partId, ""))} className="wire-preview" fill="none" />}
@@ -1362,7 +1401,7 @@ export default function Workbench() {
             {tool.kind === "wire" && <div className="tool-hint"><Icon name="wire" size={14} />{connectionStart ? "Select the destination pin" : "Select a source pin to start wiring"}<button onClick={() => { setTool({ kind: "select" }); setConnectionStart(null); }}>ESC</button></div>}
             {tool.kind === "probe" && <div className="tool-hint"><Icon name="probe" size={14} />Select a pin to place a voltage probe<button onClick={() => setTool({ kind: "select" })}>ESC</button></div>}
             <div className="canvas-mini-toolbar"><button className="mini-tool-pill" onClick={() => setTool({ kind: "wire" })}><Icon name="wire" size={14} /><span>Wire</span><kbd>W</kbd></button><button className="mini-tool-pill" onClick={() => setTool({ kind: "probe" })}><Icon name="probe" size={14} /><span>Probe</span></button><button className="mini-tool-pill" onClick={() => openInstrument("Oscilloscope")}><Icon name="scope" size={14} /><span>Scope</span></button></div>
-            {activeInstrument && <div className={`floating-instrument instrument-${activeInstrument.toLowerCase().replaceAll(" ", "-")}`} style={{ left: instrumentPosition.x, top: instrumentPosition.y }}>
+            {activeInstrument && <div className={`floating-instrument instrument-${activeInstrument.toLowerCase().replaceAll(" ", "-")}`} style={{ left: instrumentPosition.x, top: instrumentPosition.y }} role="dialog" aria-label={`${activeInstrument} instrument`} aria-modal="false">
               <div className={`instrument-titlebar${instrumentDrag ? " dragging" : ""}`} onPointerDown={instrumentTitlePointerDown} onPointerMove={instrumentTitlePointerMove} onPointerUp={instrumentTitlePointerUp} onPointerCancel={instrumentTitlePointerUp}>
                 <div className="instrument-title-icon"><Icon name={activeInstrument === "DMM" ? "target" : activeInstrument === "Oscilloscope" ? "scope" : activeInstrument === "Function generator" ? "waveform" : activeInstrument === "Bode plotter" ? "chart" : activeInstrument === "Logic analyzer" ? "logic" : activeInstrument === "Wattmeter" ? "bolt" : "diode"} size={15} /></div><div><strong>{activeInstrument}</strong><small>VIRTUAL INSTRUMENT · CH A</small></div><div className="instrument-window-actions"><button className="icon-button small" title="Dock to bottom" onClick={() => { setActiveDockTab("Scope"); setActiveInstrument(null); }}><Icon name="expand" size={13} /></button><button className="icon-button small" title="Close" onClick={() => setActiveInstrument(null)}><Icon name="close" size={14} /></button></div>
               </div>
@@ -1418,7 +1457,28 @@ export default function Workbench() {
         </section>
 
         <aside className={`inspector-sidebar${showRightPanel ? "" : " sidebar-collapsed"}`}>
-          <div className="inspector-header"><div><span className="eyebrow">PROPERTIES</span><strong>{selectedPart ? "Inspector" : "Design settings"}</strong></div><button className="icon-button small" onClick={() => setShowRightPanel(false)} title="Close inspector"><Icon name="close" size={15} /></button></div>
+          <div className="inspector-header"><div><span className="eyebrow">PROPERTIES</span><strong>{selectedPart ? "Inspector" : selectedWire ? "Connection" : "Design settings"}</strong></div><button className="icon-button small" onClick={() => setShowRightPanel(false)} title="Close inspector"><Icon name="close" size={15} /></button></div>
+          {selectedWire && !selectedPart && (() => {
+            const fromPart = document.parts.find((part) => part.id === selectedWire.from.partId);
+            const toPart = document.parts.find((part) => part.id === selectedWire.to.partId);
+            const fromPoint = fromPart ? getPinPosition(fromPart, selectedWire.from.pin) : null;
+            const toPoint = toPart ? getPinPosition(toPart, selectedWire.to.pin) : null;
+            const length = fromPoint && toPoint ? Math.round(Math.hypot(toPoint.x - fromPoint.x, toPoint.y - fromPoint.y)) : 0;
+            return (
+              <div className="inspector-section">
+                <div className="inspector-section-title">CONNECTION <span>WIRE</span></div>
+                <div className="wire-inspector-body">
+                  <div className="wire-endpoints">
+                    <div className="wire-endpoint"><span className="wire-endpoint-dot" /><div><strong>{fromPart?.ref ?? "—"} · pin {selectedWire.from.pin + 1}</strong><small>{fromPart?.value ?? "Unbekannt"}</small></div></div>
+                    <div className="wire-endpoint"><span className="wire-endpoint-dot" /><div><strong>{toPart?.ref ?? "—"} · pin {selectedWire.to.pin + 1}</strong><small>{toPart?.value ?? "Unbekannt"}</small></div></div>
+                  </div>
+                  <div className="inspector-readonly"><span>Route length</span><span className="wire-length">{length} px · orthogonal</span></div>
+                  <div className="inspector-readonly"><span>Electrical net</span><span>shared node</span></div>
+                  <button className="add-probe-button" onClick={removeSelectedWire}><Icon name="trash" size={13} />Leitung löschen <kbd style={{ marginLeft: "auto" }}>Entf</kbd></button>
+                </div>
+              </div>
+            );
+          })()}
           {selectedPart ? <>
             <div className="inspected-component"><div className={`inspector-component-icon icon-${selectedPart.type}`}><span>{catalog.find((item) => item.type === selectedPart.type)?.tag ?? "•"}</span></div><div><strong>{catalog.find((item) => item.type === selectedPart.type)?.name ?? selectedPart.type}</strong><span>{catalog.find((item) => item.type === selectedPart.type)?.group ?? "Component"}</span></div><button className="icon-button small" onClick={rotateSelected} title="Rotate 90°"><Icon name="rotate" size={14} /></button></div>
             <div className="inspector-section"><div className="inspector-section-title">IDENTIFICATION <span>01</span></div><label className="inspector-field"><span>Reference</span><input value={selectedPart.ref} onChange={(event) => setPartProperty(selectedPart.id, "ref", event.target.value)} /></label><label className="inspector-field"><span>Value</span><div className="input-with-unit"><input value={selectedPart.value} onChange={(event) => setPartProperty(selectedPart.id, "value", event.target.value)} /><span>{selectedPart.type === "resistor" || selectedPart.type === "potentiometer" ? "Ω" : selectedPart.type === "capacitor" ? "F" : selectedPart.type === "inductor" ? "H" : ""}</span></div></label><div className="inspector-readonly"><span>Footprint</span><span>{selectedPart.type === "ground" ? "—" : selectedPart.type === "resistor" ? "R_0603 · THT" : "Generic · 2 pin"}</span></div><div className="inspector-readonly"><span>Rotation</span><span>{selectedPart.rotation}°</span></div></div>
@@ -1464,11 +1524,11 @@ export default function Workbench() {
             </div>
             <div className="inspector-section"><div className="inspector-section-title">MEASUREMENTS <span>{document.probes.length}</span></div>{document.probes.map((probe) => <div className="inspector-probe" key={probe.id}><span className="probe-icon"><Icon name="probe" size={13} /></span><span>{probe.name}<small>{document.parts.find((part) => part.id === probe.pin.partId)?.ref ?? "—"} · pin {probe.pin.pin + 1}</small></span><b>{formatVoltage(result.outputVoltage)}</b></div>)}<button className="add-probe-button" onClick={() => setTool({ kind: "probe" })}><Icon name="plus" size={13} />Add voltage probe</button></div>
           </>}
-          <div className="instrument-shortcuts"><div className="inspector-section-title">INSTRUMENTS <button className="text-button" onClick={() => openInstrument("Oscilloscope")}>Open all</button></div><div className="instrument-shortcut-grid">{(["DMM", "Oscilloscope", "Function generator", "Bode plotter", "Logic analyzer", "Wattmeter", "IV analyzer"] as InstrumentName[]).map((instrument) => <button key={instrument} onClick={() => openInstrument(instrument)}><span className={`shortcut-icon shortcut-${instrument.toLowerCase().replaceAll(" ", "-")}`}><Icon name={instrument === "DMM" ? "target" : instrument === "Oscilloscope" ? "scope" : instrument === "Function generator" ? "waveform" : instrument === "Bode plotter" ? "chart" : instrument === "Logic analyzer" ? "logic" : instrument === "Wattmeter" ? "bolt" : "diode"} size={14} /></span>{instrument}</button>)}</div></div>
-          <div className="sidebar-version"><span>CS</span><div><strong>Circuit Studio</strong><small>EDA ENGINE · BUILD 0.9.4</small></div><button className="icon-button small" title="Settings"><Icon name="more" size={16} /></button></div>
+          <div className="instrument-shortcuts"><div className="inspector-section-title">INSTRUMENTS <span>07</span></div><div className="instrument-shortcut-grid">{(["DMM", "Oscilloscope", "Function generator", "Bode plotter", "Logic analyzer", "Wattmeter", "IV analyzer"] as InstrumentName[]).map((instrument) => <button key={instrument} onClick={() => openInstrument(instrument)}><span className={`shortcut-icon shortcut-${instrument.toLowerCase().replaceAll(" ", "-")}`}><Icon name={instrument === "DMM" ? "target" : instrument === "Oscilloscope" ? "scope" : instrument === "Function generator" ? "waveform" : instrument === "Bode plotter" ? "chart" : instrument === "Logic analyzer" ? "logic" : instrument === "Wattmeter" ? "bolt" : "diode"} size={14} /></span>{instrument}</button>)}</div></div>
+          <div className="sidebar-version"><span>CS</span><div><strong>Circuit Studio</strong><small>EDA ENGINE · BUILD 0.9.4</small></div></div>
         </aside>
       </section>
-      {toast && <div className="toast-message"><span className="toast-icon"><Icon name="check" size={14} /></span>{toast}</div>}
+      {toast && <div className="toast-message" role="status" aria-live="polite"><span className="toast-icon" aria-hidden="true"><Icon name="check" size={14} /></span>{toast}</div>}
     </main>
   );
 }
