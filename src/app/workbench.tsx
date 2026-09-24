@@ -116,6 +116,8 @@ const categoryMeta: Record<string, { icon: string; count: string }> = {
 };
 
 const storageKey = "circuit-studio-project-v1";
+/** "server" when built with a database (API routes active), otherwise browser-only. */
+const SERVER_PERSISTENCE = process.env.NEXT_PUBLIC_PERSISTENCE === "server";
 const componentGroups = Object.keys(categoryMeta);
 
 function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: number; strokeWidth?: number }) {
@@ -618,6 +620,7 @@ export default function Workbench() {
       localStorage.removeItem(storageKey);
     }
     setHydrated(true);
+    if (!SERVER_PERSISTENCE) return;
     void fetch("/api/projects", { cache: "no-store" })
       .then((response) => response.ok ? response.json() as Promise<ProjectRow[]> : [])
       .then((savedProjects) => setProjects(Array.isArray(savedProjects) ? savedProjects : []))
@@ -1011,6 +1014,17 @@ export default function Workbench() {
   async function saveProject() {
     setIsSaving(true);
     const cleanDocument = { ...documentRef.current, name: documentName };
+    if (!SERVER_PERSISTENCE) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify({ document: cleanDocument, name: documentName, id: projectId }));
+        setIsDirty(false);
+        setToast("Im Browser gespeichert · Export → .ms sichert die Datei");
+      } catch {
+        setToast("Speichern fehlgeschlagen · Browser-Speicher voll – bitte als .ms exportieren");
+      }
+      setIsSaving(false);
+      return;
+    }
     try {
       const response = await fetch("/api/projects", {
         method: "POST",

@@ -1,230 +1,167 @@
-# Circuit Studio auf Cloudflare deployen — über das Dashboard
+# MultiSpice auf Cloudflare Pages deployen
 
-Anleitung komplett über die **Cloudflare-Weboberfläche** (dashboard.cloudflare.com),
-ohne lokales Terminal. Zwei Wege: **ohne Datenbank** und **mit Datenbank**.
-
-> Circuit Studio ist eine Next.js-App. Die Simulation läuft **im Browser** —
-> ein Server wird nur für das Projekte-Speichern gebraucht.
+Standard: **statische Seite, keine Datenbank, kein Server.** Die gesamte
+Simulation läuft im Browser. Eine Datenbank lässt sich später ergänzen, ohne
+Code umzuschreiben (siehe Teil 3).
 
 ---
 
-## Übersicht
+## Wie der Build entscheidet
 
-| | **A · ohne DB** | **B · mit Postgres** | **C · mit D1** |
-|---|---|---|---|
-| Was | Statische Seiten auf Pages | Worker + externe Postgres | Worker + Cloudflare D1 |
-| Speichern | `localStorage` im Browser | serverseitig, geräteübergreifend | serverseitig, geräteübergreifend |
-| Kosten | 0 € | DB-Anbieter (Neon/Supabase haben Free Tier) | 0 € (D1 Free Tier) |
-| Aufwand | ~10 Min | ~25 Min | ~20 Min |
-| API-Routen | nein | ja | ja |
+`next.config.ts` wählt den Modus automatisch:
 
----
-
-## Teil 1 · Repo vorbereiten (einmalig, lokal)
-
-**Für A (ohne DB):** statischen Export aktivieren. In `next.config.ts`:
-
-```ts
-const nextConfig: NextConfig = { output: "export", images: { unoptimized: true } };
-```
-
-Dann committen und zu GitHub/GitLab pushen.
-
-**Für B und C:** nichts ändern — die App deployed mit SSR.
-
-> Die API-Routen `/api/projects`, `/api/simulate`, `/api/health` funktionieren
-> nur in B und C. In A fällt die App automatisch auf `localStorage` zurück.
-
----
-
-## Teil 2 · Cloudflare Pages-Projekt anlegen
-
-1. Dashboard öffnen → linke Navigation → **Workers & Pages**.
-2. **Create application** → Tab **Pages** → **Connect to Git**.
-3. Repository auswählen (GitHub autorisieren, falls noch nicht geschehen).
-4. **Build settings** eintragen:
-
-| Feld | A · ohne DB | B / C · mit DB |
+| Bedingung | Modus | Ergebnis |
 |---|---|---|
-| Framework preset | `Next.js` | `Next.js` |
-| Build command | `npm run build` | `npm run build` |
-| Build output directory | `out` | `.vercel/static/out` |
-| Root directory | `/` | `/` |
-| Node version | `20` oder höher | `20` oder höher |
+| keine `DATABASE_URL`, kein `NEXT_OUTPUT` | **statisch** (Standard) | Ordner `out/` → Cloudflare Pages |
+| `DATABASE_URL` gesetzt **oder** `NEXT_OUTPUT=server` | Server | `.next/` + API-Routen (`/api/projects`, `/api/simulate`, `/api/health`) |
 
-5. **Save and Deploy** klicken. Der erste Bau dauert 1–3 Minuten.
-6. Danach ist die App unter `<projekt>.pages.dev` erreichbar.
+Die API-Routen liegen als `src/app/api/**/route.server.ts` im Repo. Im
+statischen Modus ignoriert Next.js sie; im Server-Modus werden sie aktiv.
 
-### Was in A nicht geht
-
-`localStorage` ist pro Browser und Gerät gebunden. Auf dem Handy sind die
-Projekte vom PC nicht sichtbar — dafür aber **Export → .ms** (Datei lässt sich
-überall importieren). Das ist für Demos, Portfolios und Einzelnutzer vollkommen
-ausreichend.
+**Speichern im statischen Modus:** Projekte liegen im Browser
+(`localStorage`). Über **Export → .ms** lässt sich jede Schaltung als Datei
+sichern und auf jedem Gerät per **Import** wieder öffnen.
 
 ---
 
-## Teil 3 · Mit Datenbank (Variante B — Postgres)
+## Teil 1 · Deployen über das Dashboard (ohne DB)
 
-Empfohlen, wenn du von mehreren Geräten arbeiten willst.
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** →
+   **Create** → Tab **Pages** → **Connect to Git**.
+2. Repository `multispice` auswählen → **Begin setup**.
+3. Build-Einstellungen:
 
-### 3.1 Postgres-Datenbank besorgen
-
-**Neon** (empfohlen, serverless):
-1. [neon.tech](https://neon.tech) → Sign up → **Create project**.
-2. Region möglichst nahe an deinen Nutzern (`eu-central-1` für DACH).
-3. In **Connection Details** den String kopieren, Form **Pooled connection**:
-   `postgres://user:password@ep-xyz-pooler.eu-central-1.aws.neon.tech/dbname?sslmode=require`
-
-**Supabase** geht genauso: Projekt anlegen → **Project Settings → Database →
-Connection string → URI**, Port `6543` (Pooler) nutzen.
-
-### 3.2 Schema anlegen
-
-Im Neon-Dashboard: **SQL Editor** → dieses Statement einfügen → **Run**:
-
-```sql
-CREATE TABLE IF NOT EXISTS eda_projects (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  document    JSONB NOT NULL,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS eda_projects_updated_at_idx ON eda_projects (updated_at DESC);
-```
-
-### 3.3 Verbindung in Cloudflare hinterlegen
-
-1. Pages-Projekt öffnen → **Settings** → **Environment variables**.
-2. Variable anlegen:
-
-| Name | Wert |
+| Feld | Wert |
 |---|---|
-| `DATABASE_URL` | der Connection-String aus 3.1 |
+| Framework preset | `None` (oder `Next.js (Static HTML Export)`) |
+| Build command | `npm run build` |
+| Build output directory | `out` |
+| Root directory | *(leer lassen)* |
 
-3. Haken **Production** (und **Preview**, wenn gewünscht) setzen → **Save**.
-4. Wichtig: Nach dem Ändern von Variablen unter **Deployments** oben rechts
-   **Retry deployment** auslösen — der Wert steht erst im nächsten Deployment
-   zur Verfügung.
+4. **Environment variables:** keine nötig. Wichtig: **keine** `DATABASE_URL`
+   setzen, sonst baut Next.js im Server-Modus und `out/` fehlt.
+5. **Save and Deploy.** Nach ca. 1–2 Minuten läuft die App unter
+   `https://<projekt>.pages.dev`.
 
-### 3.4 Prüfen
+> Das Repo enthält eine `wrangler.toml` mit `pages_build_output_dir = "out"`.
+> Cloudflare liest sie automatisch – das Output-Feld im Dashboard ist damit
+> bereits korrekt vorbelegt.
 
-`https://<projekt>.pages.dev/api/health` aufrufen. Antwort:
+### Wichtig: keine `.env` ins Repo committen
 
-```json
-{ "ok": true }
-```
+Liegt eine `.env` mit `DATABASE_URL` im Repository, schaltet der Build auf
+Server-Modus und das Deployment schlägt mit *„Output directory "out" not
+found"* fehl. `.env` gehört in `.gitignore`.
 
-Erscheint `{ "ok": false }`, ist die Variable nicht gesetzt oder der String
-falsch (häufig: `?sslmode=require` fehlt, oder Passwort enthielt Sonderzeichen,
-die URL-kodiert werden müssen).
+### Updates
+
+Jeder Push auf den Produktions-Branch löst automatisch ein neues Deployment
+aus. Zurückrollen: **Deployments** → älteres Deployment → **⋯** → **Rollback**.
+
+### Eigene Domain
+
+Projekt → **Custom domains** → **Set up a custom domain** → Domain eintragen.
+Liegt die Domain bereits bei Cloudflare, werden die DNS-Einträge automatisch
+gesetzt.
 
 ---
 
-## Teil 4 · Mit D1 statt Postgres (Variante C — alles bei Cloudflare)
+## Teil 2 · Lokal prüfen, was Cloudflare baut
 
-Wenn du keinen externen DB-Anbieter willst.
+```bash
+npm install
+npm run build          # ohne DATABASE_URL → erzeugt out/
+npx serve out          # oder: npx wrangler pages dev out
+```
 
-### 4.1 D1-Datenbank anlegen
+Wenn `out/index.html` existiert, funktioniert auch das Cloudflare-Deployment.
 
-1. Dashboard → **Workers & Pages** → Tab **D1 SQL Database** → **Create**.
-2. Name: `circuit-studio`, Location: automatisch.
-3. Datenbank öffnen → Tab **Console** → einfügen und ausführen:
+---
+
+## Teil 3 · Später: Datenbank ergänzen
+
+Cloudflare Pages liefert nur statische Dateien aus. Für die API-Routen braucht
+es einen Server-Runtime – bei Cloudflare sind das **Workers** über
+[OpenNext](https://opennext.js.org/cloudflare). Der Code ist dafür vorbereitet:
+
+- API-Routen existieren bereits (`route.server.ts`).
+- `src/db/index.ts` verbindet sich lazy – nur wenn eine Route die DB benutzt.
+- Das UI schaltet automatisch um: Mit `NEXT_PUBLIC_PERSISTENCE=server`
+  (automatisch gesetzt im Server-Modus) werden Projekte über `/api/projects`
+  gespeichert und geräteübergreifend geladen.
+
+### 3.1 Postgres anlegen (z. B. Neon, kostenloser Einstieg)
+
+1. [neon.tech](https://neon.tech) → Projekt anlegen, Region `eu-central-1`.
+2. **SQL Editor** → ausführen:
 
 ```sql
 CREATE TABLE IF NOT EXISTS eda_projects (
   id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
-  document   TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  document   JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS eda_projects_updated_at_idx ON eda_projects (updated_at DESC);
 ```
 
-### 4.2 Bindung an Pages/Worker knüpfen
+3. Den **pooled** Connection-String kopieren
+   (`postgres://…-pooler…neon.tech/db?sslmode=require`).
 
-1. Pages-Projekt → **Settings** → **Functions** → **D1 database bindings**.
-2. **Add binding**:
+### 3.2 Auf Workers umstellen (einmalig, lokal)
 
-| Feld | Wert |
-|---|---|
-| Variable name | `DB` |
-| D1 database | `circuit-studio` |
-
-3. **Save** → **Retry deployment**.
-
-### 4.3 Code-Umstellung
-
-D1 spricht SQLite, nicht Postgres. In `src/app/api/projects/route.ts` statt
-Drizzle das Binding benutzen:
-
-```ts
-export const runtime = "edge";
-
-interface D1Database {
-  prepare(query: string): {
-    bind(...values: unknown[]): { all<T>(): Promise<{ results: T[] }> };
-  };
-}
-
-export async function GET() {
-  const { results } = await getDB()
-    .prepare("SELECT id, name, document, updated_at AS updatedAt FROM eda_projects ORDER BY updated_at DESC LIMIT 30")
-    .all<{ id: string; name: string; document: string; updatedAt: string }>();
-  return Response.json(results.map((row) => ({ ...row, document: JSON.parse(row.document) })));
-}
-
-function getDB(): D1Database {
-  // @ts-expect-error -- Cloudflare binding, injected at the edge
-  return globalThis.DB as D1Database;
-}
+```bash
+npm install -D @opennextjs/cloudflare wrangler
 ```
 
-Für `POST` analog mit `INSERT … ON CONFLICT(id) DO UPDATE SET …`.
+`wrangler.toml` ersetzen durch:
 
-Das UI bleibt unverändert, weil es nur `/api/projects` aufruft.
+```toml
+name = "multispice"
+main = ".open-next/worker.js"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
 
----
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+```
 
-## Teil 5 · Eigenene Domain
+`open-next.config.ts` im Projektroot anlegen:
 
-1. Pages-Projekt → **Custom domains** → **Set up a domain**.
-2. Domain eintragen, Cloudflare prüft die DNS-Einträge automatisch.
-3. Nach Aktivierung ist die App unter der eigenen Domain erreichbar;
-   `<projekt>.pages.dev` leitet weiter.
+```ts
+import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+export default defineCloudflareConfig();
+```
 
----
+In `package.json` diese Scripts ergänzen:
 
-## Teil 6 · Wartung
+```json
+"build:worker": "NEXT_OUTPUT=server opennextjs-cloudflare build",
+"deploy:worker": "npm run build:worker && wrangler deploy"
+```
 
-| Aufgabe | Wo |
-|---|---|
-| Neues Deployment | Push zu `main` → automatisch |
-| Manuell neu bauen | **Deployments → ⋯ → Retry deployment** |
-| Zurückrollen | **Deployments → älteres Deployment → ⋯ → Rollback** |
-| Variable ändern | **Settings → Environment variables** → danach Retry |
-| Logs ansehen | **Deployments → Live logs** |
-| D1-Daten prüfen | D1 → **Console** → `SELECT * FROM eda_projects LIMIT 5` |
+### 3.3 Im Dashboard verbinden
+
+1. **Workers & Pages** → **Create** → Tab **Workers** → **Import a repository**.
+2. Build command: `npm run build:worker` · Deploy command: `npx wrangler deploy`.
+3. **Settings → Variables and Secrets** → **Add**:
+   - `DATABASE_URL` (Typ *Secret*) = Connection-String aus 3.1
+   - `NEXT_OUTPUT` = `server`
+4. **Deploy**. Prüfen: `https://<worker>.workers.dev/api/health` → `{"ok":true}`.
+
+Das bestehende Pages-Projekt kann danach gelöscht oder als statische
+Fallback-Version weiterbetrieben werden.
 
 ---
 
 ## Fehlerbehebung
 
-| Symptom | Ursache | Behebung |
+| Meldung | Ursache | Lösung |
 |---|---|---|
-| `DATABASE_URL is required` | Variable fehlt im Deployment | Settings → Variables → danach **Retry deployment** |
-| `/api/health` gibt 404 | Variante A (statischer Export) | `output: "export"` entfernen oder lokalen Modus nutzen |
-| `{ "ok": false }` | String falsch / SSL fehlt | `?sslmode=require` anhängen, Sonderzeichen im Passwort URL-kodieren |
-| D1: `JSON.parse` wirft Fehler | Dokument nicht als Text gespeichert | Spalte `document TEXT`, beim Schreiben `JSON.stringify()` |
-| Build schlägt fehl: „Failed to compile" | Node-Version zu alt | Settings → Build → Node `20` |
-| Änderungen unsichtbar | Build-Cache | Deployments → ⋯ → **Retry deployment** mit Cache löschen |
-
----
-
-## Empfehlung
-
-- **Demo, Portfolio, ein Nutzer, ein Gerät** → Variante A. Null Kosten, null Wartung.
-- **Ernsthafte Nutzung, Team, mehrere Geräte** → Variante B mit Neon.
-- **Alles in einem Cloudflare-Account, kein externer Anbieter** → Variante C mit D1.
+| `Output directory "out" not found` | Build lief im Server-Modus | `DATABASE_URL`/`NEXT_OUTPUT` aus den Pages-Variablen entfernen, `.env` nicht committen |
+| `Wrangler configuration file … does not appear to be valid` | alte `wrangler.json(c)` im Repo | löschen; nur `wrangler.toml` mit `pages_build_output_dir` behalten |
+| Seite lädt, Speichern sagt „Im Browser gespeichert" | statischer Modus – korrektes Verhalten | für geräteübergreifendes Speichern Teil 3 umsetzen |
+| `/api/health` gibt 404 | statischer Modus hat keine API | erwartet; API nur mit Teil 3 |
+| Build: `Node.js version` zu alt | Pages nutzt ältere Node-Version | Variable `NODE_VERSION` = `22` setzen |

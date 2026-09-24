@@ -168,3 +168,5 @@ Vor jedem Merge gegen `main` — ausnahmslos:
 | `/` hatte keine Funktion, obwohl als Taste angezeigt | Fokussiert die Bauteilsuche |
 | Banner ohne Live-Region | Toast mit `role="status"` und `aria-live="polite"` |
 | Standard war Light — Manifest verlangt Dunkel zuerst | Dark ist Default, Light ist Opt-in |
+| Statischer Build meldete „Datenbankverbindung nicht verfügbar", obwohl gar keine DB vorgesehen ist | Ehrlicher Zustand: „Im Browser gespeichert · Export → .ms sichert die Datei"; keine API-Anfragen im statischen Modus |
+| Cloudflare Pages fand kein `out/` | Statischer Export ist Standard; Server-Modus nur mit `DATABASE_URL` / `NEXT_OUTPUT=server` |
