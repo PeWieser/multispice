@@ -1,0 +1,5 @@
+# Cloudflare Pages — static build (default).
+# Build command: npm run build   ·   Output directory: out
+name = "multispice"
+compatibility_date = "2025-09-01"
+pages_build_output_dir = "out"
