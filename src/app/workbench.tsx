@@ -13,13 +13,16 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
+  CIRCUIT_PRESETS,
   DEFAULT_CIRCUIT,
+  DEFAULT_SETTINGS,
   getPinOffsets,
   getPinPosition,
   parseSpiceValue,
   simulateCircuit,
   type AnalysisMode,
   type CircuitDocument,
+  type IntegrationMethod,
   type PinReference,
   type Point,
   type SchematicPart,
@@ -40,6 +43,10 @@ const catalog = [
   { type: "pulse-source", name: "Pulse source", value: "PULSE(0 5 0 1u 1u 0.5m 1m)", group: "Sources", ref: "VP", tag: "⌁", detail: "PULSE · PWL · SINE" },
   { type: "function-generator", name: "Function generator", value: "SINE(0 2 1k)", group: "Sources", ref: "XFG", tag: "ƒ", detail: "AM · FM · arbitrary" },
   { type: "current", name: "Current source", value: "1 mA", group: "Sources", ref: "I", tag: "I", detail: "Independent source" },
+  { type: "vcvs", name: "VCVS", value: "10", group: "Sources", ref: "E", tag: "E", detail: "Voltage controlled voltage source" },
+  { type: "vccs", name: "VCCS", value: "0.01", group: "Sources", ref: "G", tag: "G", detail: "Voltage controlled current source" },
+  { type: "ccvs", name: "CCVS", value: "1000", group: "Sources", ref: "H", tag: "H", detail: "Current controlled voltage source" },
+  { type: "cccs", name: "CCCS", value: "100", group: "Sources", ref: "F", tag: "F", detail: "Current controlled current source" },
   { type: "diode", name: "Diode", value: "1N4148", group: "Semiconductors", ref: "D", tag: "▷", detail: "Silicon · rectifier" },
   { type: "led", name: "LED", value: "Red · 5 mm", group: "Semiconductors", ref: "D", tag: "↗", detail: "Indicator · RGB" },
   { type: "zener", name: "Zener diode", value: "5.1 V", group: "Semiconductors", ref: "D", tag: "Z", detail: "Reference · clamp" },
@@ -48,6 +55,12 @@ const catalog = [
   { type: "transistor-pnp", name: "PNP transistor", value: "2N3906", group: "Semiconductors", ref: "Q", tag: "P", detail: "BJT · small signal" },
   { type: "mosfet-n", name: "N-channel MOSFET", value: "2N7000", group: "Semiconductors", ref: "Q", tag: "M", detail: "Enhancement · logic level" },
   { type: "mosfet-p", name: "P-channel MOSFET", value: "BS250", group: "Semiconductors", ref: "Q", tag: "M", detail: "Enhancement · high side" },
+  { type: "jfet", name: "JFET", value: "2N5459", group: "Semiconductors", ref: "Q", tag: "J", detail: "N-channel · depletion" },
+  { type: "igbt", name: "IGBT", value: "IRG4BC20", group: "Semiconductors", ref: "Q", tag: "G", detail: "Power switch · 600 V" },
+  { type: "scr", name: "SCR / thyristor", value: "2N5064", group: "Semiconductors", ref: "Q", tag: "SCR", detail: "Latching · gate triggered" },
+  { type: "triac", name: "Triac", value: "BT136", group: "Semiconductors", ref: "Q", tag: "TRI", detail: "Bidirectional AC switch" },
+  { type: "varactor", name: "Varactor diode", value: "40 pF", group: "Semiconductors", ref: "D", tag: "V", detail: "Voltage variable capacitance" },
+  { type: "photodiode", name: "Photodiode", value: "BPW34", group: "Semiconductors", ref: "D", tag: "☀", detail: "Light to current converter" },
   { type: "opamp", name: "Operational amplifier", value: "LM741", group: "Analog ICs", ref: "U", tag: "▷", detail: "Universal · GBW 1 MHz" },
   { type: "comparator", name: "Comparator", value: "LM393", group: "Analog ICs", ref: "U", tag: "▷", detail: "Open-collector output" },
   { type: "timer", name: "555 timer", value: "NE555", group: "Analog ICs", ref: "U", tag: "555", detail: "Astable · monostable" },
@@ -70,7 +83,7 @@ type InstrumentName = "DMM" | "Oscilloscope" | "Function generator" | "Bode plot
 type DockTab = "Scope" | "Netlist" | "Console" | "Analysis";
 type ProjectRow = { id: string; name: string; document: CircuitDocument; updatedAt: string };
 type PointerInteraction =
-  | { kind: "move"; id: string; start: Point; origin: Point }
+  | { kind: "move"; id: string; start: Point; origin: Point; moved: boolean }
   | { kind: "pan"; lastX: number; lastY: number };
 
 const analysisOptions: { name: AnalysisMode; eyebrow: string; detail: string }[] = [
@@ -78,7 +91,12 @@ const analysisOptions: { name: AnalysisMode; eyebrow: string; detail: string }[]
   { name: "AC Sweep", eyebrow: "02", detail: "Frequency · gain & phase" },
   { name: "DC Operating Point", eyebrow: "03", detail: "Steady-state node voltages" },
   { name: "DC Sweep", eyebrow: "04", detail: "Transfer characteristic" },
-  { name: "Monte Carlo", eyebrow: "05", detail: "Tolerance · 48 runs" },
+  { name: "Monte Carlo", eyebrow: "05", detail: "Tolerance statistics" },
+  { name: "Fourier", eyebrow: "06", detail: "Harmonics & THD" },
+  { name: "Noise", eyebrow: "07", detail: "Thermal noise density" },
+  { name: "Temperature Sweep", eyebrow: "08", detail: "Drift over −20…120 °C" },
+  { name: "Parameter Sweep", eyebrow: "09", detail: "Component value sweep" },
+  { name: "Worst Case", eyebrow: "10", detail: "Tolerance corner cases" },
 ];
 
 const categoryMeta: Record<string, { icon: string; count: string }> = {
@@ -449,6 +467,45 @@ function SignalChart({ result, progress = 0, compact = false }: { result: Simula
   );
 }
 
+/** Device characteristic curves for the IV analyzer instrument. */
+function ivCurves(device: string) {
+  const vt = 0.025852;
+  const curves: { label: string; points: { x: number; y: number }[]; color: string }[] = [];
+  if (device.startsWith("Diode")) {
+    const points: { x: number; y: number }[] = [];
+    for (let step = 0; step <= 120; step += 1) {
+      const v = -1 + (step * 1.9) / 120;
+      const current = v >= 0 ? 2.52e-9 * (Math.exp(Math.min(v / (1.752 * vt), 60)) - 1) : -1e-9;
+      points.push({ x: v, y: current * 1000 });
+    }
+    curves.push({ label: "1N4148", points, color: "#87e84b" });
+  } else if (device.startsWith("NPN")) {
+    const colors = ["#87e84b", "#39b7a4", "#eea550", "#9d8cff"];
+    [10, 25, 40, 60].forEach((base, index) => {
+      const points: { x: number; y: number }[] = [];
+      for (let step = 0; step <= 80; step += 1) {
+        const vce = (step * 14) / 80;
+        const collector = Math.min(416 * base * 1e-6, Math.max(0, (13 - vce) / 1000));
+        points.push({ x: vce, y: collector * 1000 });
+      }
+      curves.push({ label: `Ib ${base} µA`, points, color: colors[index % colors.length] });
+    });
+  } else {
+    const colors = ["#87e84b", "#39b7a4", "#eea550"];
+    [2.8, 3.6, 4.4].forEach((vgs, index) => {
+      const points: { x: number; y: number }[] = [];
+      for (let step = 0; step <= 80; step += 1) {
+        const vds = (step * 10) / 80;
+        const vgst = vgs - 2.5;
+        const current = vds < vgst ? 0.16 * (vgst * vds - 0.5 * vds * vds) : 0.5 * 0.16 * vgst * vgst;
+        points.push({ x: vds, y: current * 1000 });
+      }
+      curves.push({ label: `Vgs ${vgs} V`, points, color: colors[index % colors.length] });
+    });
+  }
+  return curves;
+}
+
 function formatTime(milliseconds: number) {
   if (milliseconds < 1) return `${(milliseconds * 1000).toFixed(0)} µs`;
   if (milliseconds < 1000) return `${milliseconds.toFixed(2)} ms`;
@@ -458,8 +515,11 @@ function formatTime(milliseconds: number) {
 export default function Workbench() {
   const [document, setDocument] = useState<CircuitDocument>(() => cloneCircuit(DEFAULT_CIRCUIT));
   const [documentName, setDocumentName] = useState(DEFAULT_CIRCUIT.name);
-  const [result, setResult] = useState<SimulationResult>(() => simulateCircuit(DEFAULT_CIRCUIT, "Transient", 120));
+  const [result, setResult] = useState<SimulationResult>(() => simulateCircuit(DEFAULT_CIRCUIT, "Transient", 120, DEFAULT_SETTINGS));
   const [analysis, setAnalysis] = useState<AnalysisMode>("Transient");
+  const [simSettings, setSimSettings] = useState(DEFAULT_SETTINGS);
+  const [analysisPoints, setAnalysisPoints] = useState(120);
+  const [parameterTarget, setParameterTarget] = useState<string | undefined>(undefined);
   const [tool, setTool] = useState<ToolState>({ kind: "select" });
   const [selectedPartId, setSelectedPartId] = useState<string | null>("r1");
   const [connectionStart, setConnectionStart] = useState<PinReference | null>(null);
@@ -471,7 +531,7 @@ export default function Workbench() {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("All components");
   const [expandedGroups, setExpandedGroups] = useState<string[]>(["Passive", "Sources"]);
-  const [sidebarTab, setSidebarTab] = useState<"Library" | "Project">("Library");
+  const [sidebarTab, setSidebarTab] = useState<"Library" | "Project" | "Presets">("Library");
   const [recentTypes, setRecentTypes] = useState<string[]>(["resistor", "capacitor", "voltage", "ground"]);
   const [activeDockTab, setActiveDockTab] = useState<DockTab>("Scope");
   const [activeInstrument, setActiveInstrument] = useState<InstrumentName | null>(null);
@@ -495,6 +555,9 @@ export default function Workbench() {
   const [netlistText, setNetlistText] = useState(() => generateNetlist(DEFAULT_CIRCUIT));
   const [netlistEditable, setNetlistEditable] = useState(false);
   const [dmmMode, setDmmMode] = useState("DC V");
+  const [scopeChannels, setScopeChannels] = useState([true, false, false, false]);
+  const [scopeMath, setScopeMath] = useState<"None" | "A+B" | "A−B" | "FFT" | "XY">("None");
+  const [ivDevice, setIvDevice] = useState("Diode · 1N4148");
   const [generatorShape, setGeneratorShape] = useState("SINE");
   const [generatorFrequency, setGeneratorFrequency] = useState("1 kHz");
   const [generatorAmplitude, setGeneratorAmplitude] = useState("2 Vpp");
@@ -517,6 +580,12 @@ export default function Workbench() {
     documentRef.current = document;
   }, [document]);
 
+  const solve = useCallback(
+    (circuit: CircuitDocument, mode: AnalysisMode = "Transient", points = analysisPoints) =>
+      simulateCircuit(circuit, mode, points, simSettings, { parameterId: parameterTarget }),
+    [analysisPoints, simSettings, parameterTarget],
+  );
+
   useEffect(() => {
     if (window.innerWidth <= 760) {
       setShowLeftPanel(false);
@@ -532,7 +601,7 @@ export default function Workbench() {
           documentRef.current = restored;
           setDocumentName(parsed.name || restored.name || DEFAULT_CIRCUIT.name);
           setProjectId(parsed.id ?? null);
-          setResult(simulateCircuit(restored, "Transient", 120));
+          setResult(solve(restored, "Transient", 120));
           setNetlistText(generateNetlist(restored));
           setSelectedPartId(restored.parts.find((part) => part.type !== "ground")?.id ?? null);
         }
@@ -545,7 +614,7 @@ export default function Workbench() {
       .then((response) => response.ok ? response.json() as Promise<ProjectRow[]> : [])
       .then((savedProjects) => setProjects(Array.isArray(savedProjects) ? savedProjects : []))
       .catch(() => setProjects([]));
-  }, []);
+  }, [solve]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -629,7 +698,7 @@ export default function Workbench() {
     return matchesText && matchesGroup;
   });
   const netlist = useMemo(() => generateNetlist(document), [document]);
-  const bodePreview = useMemo(() => result.domain === "frequency" ? result : simulateCircuit(document, "AC Sweep", 72), [document, result]);
+  const bodePreview = useMemo(() => result.domain === "frequency" ? result : solve(document, "AC Sweep", 72), [document, result, solve]);
   const progress = result.domain === "time" ? Math.min(1, elapsed / Math.max(1, result.duration * 1000)) : Math.min(1, elapsed / 4000);
   const loadPart = document.parts.find((part) => part.type === "resistor" && part.id !== "r1") ?? document.parts.find((part) => part.type === "resistor");
   const loadResistance = Math.max(parseSpiceValue(loadPart?.value ?? "10 kΩ", 10_000), 1);
@@ -798,7 +867,7 @@ export default function Workbench() {
       if (part && tool.kind === "select") {
         setSelectedPartId(part.id);
         rememberHistory();
-        interactionRef.current = { kind: "move", id: part.id, start: getWorldPoint(event.clientX, event.clientY), origin: { x: part.x, y: part.y } };
+        interactionRef.current = { kind: "move", id: part.id, start: getWorldPoint(event.clientX, event.clientY), origin: { x: part.x, y: part.y }, moved: false };
         event.currentTarget.setPointerCapture(event.pointerId);
       }
       return;
@@ -813,6 +882,7 @@ export default function Workbench() {
     const interaction = interactionRef.current;
     if (!interaction) return;
     if (interaction.kind === "move") {
+      interaction.moved = true;
       setDocument((current) => {
         const next = {
           ...current,
@@ -838,6 +908,14 @@ export default function Workbench() {
   }
 
   function handleCanvasPointerUp(event: ReactPointerEvent<SVGSVGElement>) {
+    const interaction = interactionRef.current;
+    if (interaction?.kind === "move" && !interaction.moved) {
+      const part = documentRef.current.parts.find((entry) => entry.id === interaction.id);
+      if (part && ["switch", "relay", "fuse"].includes(part.type)) {
+        const nextClosed = !part.closed;
+        applyInteractive(part.id, { closed: nextClosed }, `${part.ref} ${nextClosed ? "geschlossen" : "geöffnet"} · live nachsimuliert`);
+      }
+    }
     interactionRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   }
@@ -865,11 +943,11 @@ export default function Workbench() {
 
   function runSimulation() {
     try {
-      const next = simulateCircuit(documentRef.current, analysis, 120);
+      const next = solve(documentRef.current, analysis, analysisPoints);
       setResult(next);
       setElapsed(0);
       setIsRunning(true);
-      setActiveDockTab(analysis === "AC Sweep" ? "Analysis" : "Scope");
+      setActiveDockTab(analysis === "AC Sweep" || analysis === "Noise" || analysis === "Fourier" ? "Analysis" : "Scope");
       setConsoleLines((lines) => [`${new Date().toLocaleTimeString("de-DE")} · ${analysis} · ${documentRef.current.parts.length} devices · ${next.sampleCount} samples`, ...lines].slice(0, 18));
       setToast(`${next.status} · ${next.sampleCount} Samples`);
     } catch (error) {
@@ -928,7 +1006,7 @@ export default function Workbench() {
     setDocumentName(project.name);
     setProjectId(project.id);
     setSelectedPartId(restored.parts.find((part) => part.type !== "ground")?.id ?? null);
-    setResult(simulateCircuit(restored, "Transient", 120));
+    setResult(solve(restored, "Transient", 120));
     setAnalysis("Transient");
     setNetlistText(generateNetlist(restored));
     setElapsed(0);
@@ -995,7 +1073,7 @@ export default function Workbench() {
       setDocumentName(imported.name);
       setProjectId(null);
       setSelectedPartId(imported.parts.find((part) => part.type !== "ground")?.id ?? null);
-      setResult(simulateCircuit(imported, "Transient", 120));
+      setResult(solve(imported, "Transient", 120));
       setNetlistText(generateNetlist(imported));
       historyRef.current = { past: [], future: [] };
       setIsDirty(true);
@@ -1011,7 +1089,7 @@ export default function Workbench() {
         setProjectId(null);
         setSelectedPartId(spice.parts[0]?.id ?? null);
         setNetlistText(generateNetlist(spice));
-        setResult(simulateCircuit(spice, "Transient", 120));
+        setResult(solve(spice, "Transient", 120));
         setIsDirty(true);
         setToast(`SPICE-Netlist importiert · ${spice.parts.length} Komponenten erkannt`);
       }
@@ -1069,6 +1147,26 @@ export default function Workbench() {
     setToast(`Generator output · ${generatorShape} · ${frequency} Hz`);
   }
 
+  function loadPreset(presetId: string) {
+    const preset = CIRCUIT_PRESETS.find((entry) => entry.id === presetId);
+    if (!preset) return;
+    const circuit = preset.build();
+    setDocument(circuit);
+    documentRef.current = circuit;
+    setDocumentName(circuit.name);
+    setProjectId(null);
+    setSelectedPartId(circuit.parts.find((part) => part.type !== "ground")?.id ?? null);
+    setResult(solve(circuit, analysis, analysisPoints));
+    setNetlistText(generateNetlist(circuit));
+    setAnalysis("Transient");
+    setElapsed(0);
+    setIsRunning(false);
+    setIsDirty(true);
+    historyRef.current = { past: [], future: [] };
+    setSidebarTab("Project");
+    setToast(`Preset „${preset.name}“ geladen · ${circuit.parts.length} Bauteile`);
+  }
+
   function createNewProject() {
     const blank: CircuitDocument = { version: 1, name: "Untitled circuit", parts: [], connections: [], probes: [] };
     setDocument(blank);
@@ -1076,7 +1174,7 @@ export default function Workbench() {
     setDocumentName("Untitled circuit");
     setProjectId(null);
     setSelectedPartId(null);
-    setResult(simulateCircuit(blank, "Transient", 120));
+    setResult(solve(blank, "Transient", 120));
     setNetlistText(generateNetlist(blank));
     historyRef.current = { past: [], future: [] };
     setIsRunning(false);
@@ -1095,12 +1193,22 @@ export default function Workbench() {
     setDocument(imported);
     documentRef.current = imported;
     setSelectedPartId(imported.parts.find((part) => part.type !== "ground")?.id ?? null);
-    setResult(simulateCircuit(imported, "Transient", 120));
+    setResult(solve(imported, "Transient", 120));
     setNetlistText(generateNetlist(imported));
     setNetlistEditable(false);
     historyRef.current = { past: [], future: [] };
     setIsDirty(true);
     setToast(`Netlist übernommen · ${imported.parts.length} Bauteile`);
+  }
+
+  function applyInteractive(partId: string, patch: Partial<SchematicPart>, message: string) {
+    const next: CircuitDocument = {
+      ...documentRef.current,
+      parts: documentRef.current.parts.map((entry) => entry.id === partId ? { ...entry, ...patch } : entry),
+    };
+    updateCircuit(() => next);
+    setResult(solve(next, analysis, analysisPoints));
+    announce(message);
   }
 
   function rotateSelected() {
@@ -1160,7 +1268,7 @@ export default function Workbench() {
 
       <section className="workbench" style={{ gridTemplateColumns: `${showLeftPanel ? "258px" : "0px"} minmax(0, 1fr) ${showRightPanel ? "286px" : "0px"}` }}>
         <aside className={`library-sidebar${showLeftPanel ? "" : " sidebar-collapsed"}`}>
-          <div className="sidebar-tabs"><button className={sidebarTab === "Library" ? "selected" : ""} onClick={() => setSidebarTab("Library")}><Icon name="component" size={14} />Library</button><button className={sidebarTab === "Project" ? "selected" : ""} onClick={() => setSidebarTab("Project")}><Icon name="layers" size={14} />Project</button><button className="sidebar-collapse" onClick={() => setShowLeftPanel(false)} title="Seitenleiste schließen"><Icon name="chevronRight" size={14} /></button></div>
+          <div className="sidebar-tabs"><button className={sidebarTab === "Library" ? "selected" : ""} onClick={() => setSidebarTab("Library")}><Icon name="component" size={14} />Library</button><button className={sidebarTab === "Project" ? "selected" : ""} onClick={() => setSidebarTab("Project")}><Icon name="layers" size={14} />Project</button><button className={sidebarTab === "Presets" ? "selected" : ""} onClick={() => setSidebarTab("Presets")}><Icon name="book" size={14} />Presets</button><button className="sidebar-collapse" onClick={() => setShowLeftPanel(false)} title="Seitenleiste schließen"><Icon name="chevronRight" size={14} /></button></div>
           {sidebarTab === "Library" ? <>
             <div className="sidebar-section-heading"><div><span className="eyebrow">DESIGN LIBRARY</span><strong>Components</strong></div><button className="icon-button small" title="Bibliothekseinstellungen"><Icon name="sliders" size={14} /></button></div>
             <label className="library-search"><Icon name="search" size={15} /><input placeholder="Search components…" value={search} onChange={(event) => setSearch(event.target.value)} /><kbd>/</kbd></label>
@@ -1178,7 +1286,20 @@ export default function Workbench() {
               {filteredComponents.length === 0 && <div className="empty-search"><Icon name="search" size={20} /><span>No components found</span><small>Try a different name or category.</small></div>}
             </div>
             <div className="library-footnote"><span className="online-dot" />2,480 models indexed <span>·</span> SPICE library</div>
-          </> : <div className="project-tree-panel"><div className="sidebar-section-heading"><div><span className="eyebrow">CURRENT DESIGN</span><strong>Project tree</strong></div><button className="icon-button small" onClick={() => setProjectMenuOpen(true)} title="Saved projects"><Icon name="folder" size={14} /></button></div><div className="tree-project-name"><Icon name="file" size={15} /><strong>{documentName}</strong><span className="tree-badge">.ms</span></div><div className="tree-section-label">SCHEMATICS <span>01</span></div><button className="tree-row active"><span className="tree-indicator" /><Icon name="component" size={14} /><span>Sheet 1 — Main circuit</span><span>⌘1</span></button><div className="tree-section-label">COMPONENTS <span>{document.parts.length}</span></div><div className="tree-component-list">{document.parts.map((part) => <button key={part.id} className={`tree-row${selectedPartId === part.id ? " active" : ""}`} onClick={() => setSelectedPartId(part.id)}><span className="tree-component-symbol">{catalog.find((item) => item.type === part.type)?.tag ?? "•"}</span><span>{part.ref}</span><small>{part.value}</small></button>)}</div><div className="tree-section-label">NETS <span>{new Set(document.connections.map((wire) => pinId(wire.from))).size}</span></div><button className="tree-row"><span className="net-color" /><span>0 · GND</span><small>Global ground</small></button><button className="tree-row"><span className="net-color signal" /><span>V(out)</span><small>{formatVoltage(result.outputVoltage)}</small></button><button className="tree-add-row" onClick={placeImportFile}><Icon name="plus" size={13} />Import a SPICE netlist</button></div>}
+          </> : sidebarTab === "Presets" ? <div className="preset-panel">
+            <div className="sidebar-section-heading"><div><span className="eyebrow">EXAMPLE CIRCUITS</span><strong>Preset library</strong></div><span className="preset-count">{CIRCUIT_PRESETS.length}</span></div>
+            <p className="preset-intro">Fertige Schaltungen inklusive Sonden und SPICE-Modellen — ideal als Startpunkt für eigene Designs.</p>
+            <div className="preset-list">
+              {CIRCUIT_PRESETS.map((preset) => (
+                <button key={preset.id} className="preset-card" onClick={() => loadPreset(preset.id)}>
+                  <span className={`preset-icon preset-${preset.category.toLowerCase()}`}><Icon name={preset.category === "Interactive" ? "switch" : preset.category === "Analog" ? "diode" : preset.category === "Mixed" ? "cpu" : preset.category === "Power" ? "bolt" : "component"} size={15} /></span>
+                  <span className="preset-copy"><strong>{preset.name}</strong><small>{preset.detail}</small></span>
+                  <span className="preset-category">{preset.category}</span>
+                </button>
+              ))}
+            </div>
+            <div className="library-footnote"><span className="online-dot" />Presets werden live simuliert</div>
+          </div> : <div className="project-tree-panel"><div className="sidebar-section-heading"><div><span className="eyebrow">CURRENT DESIGN</span><strong>Project tree</strong></div><button className="icon-button small" onClick={() => setProjectMenuOpen(true)} title="Saved projects"><Icon name="folder" size={14} /></button></div><div className="tree-project-name"><Icon name="file" size={15} /><strong>{documentName}</strong><span className="tree-badge">.ms</span></div><div className="tree-section-label">SCHEMATICS <span>01</span></div><button className="tree-row active"><span className="tree-indicator" /><Icon name="component" size={14} /><span>Sheet 1 — Main circuit</span><span>⌘1</span></button><div className="tree-section-label">COMPONENTS <span>{document.parts.length}</span></div><div className="tree-component-list">{document.parts.map((part) => <button key={part.id} className={`tree-row${selectedPartId === part.id ? " active" : ""}`} onClick={() => setSelectedPartId(part.id)}><span className="tree-component-symbol">{catalog.find((item) => item.type === part.type)?.tag ?? "•"}</span><span>{part.ref}</span><small>{part.value}</small></button>)}</div><div className="tree-section-label">NETS <span>{new Set(document.connections.map((wire) => pinId(wire.from))).size}</span></div><button className="tree-row"><span className="net-color" /><span>0 · GND</span><small>Global ground</small></button><button className="tree-row"><span className="net-color signal" /><span>V(out)</span><small>{formatVoltage(result.outputVoltage)}</small></button><button className="tree-add-row" onClick={placeImportFile}><Icon name="plus" size={13} />Import a SPICE netlist</button></div>}
         </aside>
 
         <section className="editor-column">
@@ -1221,7 +1342,10 @@ export default function Workbench() {
                   const selected = part.id === selectedPartId;
                   const offsets = getPinOffsets(part.type);
                   const hasProbe = document.probes.find((probe) => probe.pin.partId === part.id);
-                  return <g key={part.id} transform={`translate(${part.x} ${part.y})`} data-part-id={part.id} className={`schematic-part${selected ? " selected" : ""}${isRunning && part.type === "led" ? " part-live" : ""}`}>
+                  const partState = result.partStates?.[part.id];
+                  const brightness = partState?.brightness ?? 0;
+                  return <g key={part.id} transform={`translate(${part.x} ${part.y})`} data-part-id={part.id} className={`schematic-part${selected ? " selected" : ""}${brightness > 0.02 ? " part-live" : ""}${partState?.active ? " part-active" : ""}`}>
+                    {brightness > 0.02 && <circle cx="0" cy="0" r={30 + brightness * 26} className="led-glow" style={{ opacity: 0.16 + brightness * 0.5 }} />}
                     {selected && <rect x="-61" y="-52" width="122" height="104" rx="8" className="selection-outline" />}
                     <g transform={`rotate(${part.rotation})`}><PartGlyph type={part.type} />{offsets.map((_, index) => <circle key={index} cx={offsets[index].x} cy={offsets[index].y} r={tool.kind === "wire" || tool.kind === "probe" || selected ? 5.2 : 3.1} className={`pin-anchor${selected || tool.kind === "wire" || tool.kind === "probe" ? " pin-active" : ""}${connectionStart?.partId === part.id && connectionStart.pin === index ? " pin-start" : ""}`} data-pin-id={`${part.id}:${index}`} />)}</g>
                     <text className="part-reference" x="0" y={part.type === "ground" ? 34 : -32} textAnchor="middle">{part.ref}</text>
@@ -1244,12 +1368,38 @@ export default function Workbench() {
               </div>
               <div className="instrument-body">
                 {activeInstrument === "DMM" && <div className="dmm-panel"><div className="dmm-screen"><div className="dmm-topline"><span>AUTO RANGE</span><span>{dmmMode.startsWith("AC") ? "AC" : "DC"}</span></div><strong>{dmmReading}</strong><span className="dmm-unit">{dmmUnit}</span></div><div className="dmm-controls"><select value={dmmMode} onChange={(event) => setDmmMode(event.target.value)} aria-label="DMM mode"><option>DC V</option><option>AC V</option><option>DC A</option><option>AC A</option><option>Ω</option><option>dB</option></select><button className="instrument-button" onClick={() => setDmmMode((mode) => mode === "DC V" ? "Ω" : "DC V")}>AUTO / RANGE</button></div><div className="dmm-footer"><span><i className="instrument-green-led" />OL SAFE</span><span>CAT III 600 V</span></div></div>}
-                {activeInstrument === "Oscilloscope" && <div className="scope-panel"><div className="scope-readouts"><span><b className="channel-a">A</b> {formatVoltage(result.outputVoltage)} <small>DC</small></span><span>10.0 <small>ms / div</small></span><span>TRIG’D <i className="instrument-green-led" /></span></div><SignalChart result={result} progress={progress} compact /><div className="scope-controls"><label>TIME / DIV <select defaultValue="10 ms"><option>1 ms</option><option>10 ms</option><option>100 ms</option></select></label><label>TRIGGER <select defaultValue="Edge ↑"><option>Edge ↑</option><option>Edge ↓</option><option>Auto</option></select></label><button className="instrument-button" onClick={() => setActiveDockTab("Scope")}>OPEN 4-CH SCOPE</button></div></div>}
+                {activeInstrument === "Oscilloscope" && <div className="scope-panel"><div className="scope-readouts"><span><b className="channel-a">A</b> {formatVoltage(result.outputVoltage)} <small>DC</small></span><span>{(simSettings.duration * 1000 / 10).toFixed(1)} <small>ms / div</small></span><span>TRIG’D <i className="instrument-green-led" /></span></div>
+                  <div className="scope-channel-row">{["CH1", "CH2", "CH3", "CH4"].map((label, index) => <button key={label} className={`scope-channel-chip${scopeChannels[index] ? " active" : ""}`} style={{ ["--channel-color" as string]: ["#87e84b", "#39b7a4", "#eea550", "#9d8cff"][index] }} onClick={() => setScopeChannels((current) => current.map((value, position) => position === index ? !value : value))}>{label}<small>{(result.traces[index]?.values.at(-1) ?? 0).toFixed(2)} V</small></button>)}</div>
+                  <SignalChart result={result} progress={progress} compact />
+                  <div className="scope-controls"><label>MATH<select value={scopeMath} onChange={(event) => setScopeMath(event.target.value as typeof scopeMath)}><option>None</option><option>A+B</option><option>A−B</option><option>FFT</option><option>XY</option></select></label><label>TIME / DIV<select value={String(simSettings.duration * 1000)} onChange={(event) => setSimSettings((current) => ({ ...current, duration: Number(event.target.value) / 1000 }))}><option value="1">1 ms</option><option value="8">8 ms</option><option value="20">20 ms</option><option value="50">50 ms</option></select></label><button className="instrument-button" onClick={() => setActiveDockTab("Scope")}>OPEN 4-CH SCOPE</button></div>
+                  {scopeMath === "FFT" && <div className="scope-math-note">FFT view · {result.sampleCount} samples · Hanning window</div>}
+                  {scopeMath === "XY" && <div className="scope-math-note">XY mode · CH1 horizontal · CH2 vertical</div>}
+                </div>}
                 {activeInstrument === "Function generator" && <div className="generator-panel"><div className="generator-output"><span className={`generator-led${generatorEnabled ? " active" : ""}`} />OUTPUT {generatorEnabled ? "ON" : "STANDBY"}<b>50 Ω</b></div><label className="instrument-field">WAVEFORM<select value={generatorShape} onChange={(event) => setGeneratorShape(event.target.value)}><option>SINE</option><option>PULSE</option></select></label><div className="generator-fields"><label className="instrument-field">FREQUENCY<input value={generatorFrequency} onChange={(event) => setGeneratorFrequency(event.target.value)} /></label><label className="instrument-field">AMPLITUDE<input value={generatorAmplitude} onChange={(event) => setGeneratorAmplitude(event.target.value)} /></label></div><button className={`instrument-primary${generatorEnabled ? " is-on" : ""}`} onClick={applyGenerator}>{generatorEnabled ? "UPDATE OUTPUT" : "ENABLE OUTPUT"}<Icon name="play" size={13} /></button><span className="instrument-footnote">Output is coupled to the first voltage source.</span></div>}
-                {activeInstrument === "Bode plotter" && <div className="bode-panel"><div className="instrument-metric-row"><div><span>GAIN @ 1 kHz</span><strong>{(result.traces[0]?.values[Math.min(30, result.traces[0]?.values.length - 1)] ?? -3).toFixed(1)} <small>dB</small></strong></div><div><span>PHASE MARGIN</span><strong>— <small>°</small></strong></div></div><SignalChart result={bodePreview} compact /><button className="instrument-primary" onClick={() => { setAnalysis("AC Sweep"); const bode = simulateCircuit(documentRef.current, "AC Sweep", 120); setResult(bode); setActiveDockTab("Analysis"); }}>RUN AC SWEEP <Icon name="play" size={13} /></button></div>}
+                {activeInstrument === "Bode plotter" && <div className="bode-panel"><div className="instrument-metric-row"><div><span>GAIN @ 1 kHz</span><strong>{(result.traces[0]?.values[Math.min(30, result.traces[0]?.values.length - 1)] ?? -3).toFixed(1)} <small>dB</small></strong></div><div><span>PHASE MARGIN</span><strong>— <small>°</small></strong></div></div><SignalChart result={bodePreview} compact /><button className="instrument-primary" onClick={() => { setAnalysis("AC Sweep"); const bode = solve(documentRef.current, "AC Sweep", 120); setResult(bode); setActiveDockTab("Analysis"); }}>RUN AC SWEEP <Icon name="play" size={13} /></button></div>}
                 {activeInstrument === "Logic analyzer" && <div className="logic-panel"><div className="logic-header"><span>CHANNEL</span><span>HEX · 8 BIT</span><strong>7F</strong></div>{Array.from({ length: 8 }, (_, index) => <div className="logic-channel" key={index}><b>D{index}</b><div className="logic-signal"><span style={{ transform: `translateY(${((index + Math.floor(elapsed / 10)) % 2) * 5}px)` }} /></div><small>{index < 7 ? "1" : "0"}</small></div>)}<div className="logic-footer"><span>1.00 MHz</span><span>EDGE TRIGGER · D0</span><button className="instrument-button" onClick={() => setIsRunning((running) => !running)}>{isRunning ? "STOP" : "ARM"}</button></div></div>}
                 {activeInstrument === "Wattmeter" && <div className="wattmeter-panel"><div className="power-reading"><span>ACTIVE POWER</span><strong>{((result.outputVoltage * result.outputVoltage) / 10_000 * 1000).toFixed(2)}<small>mW</small></strong></div><div className="power-metrics"><div><span>APPARENT</span><b>{((result.outputVoltage * result.outputVoltage) / 10_000 * 1000).toFixed(2)} mVA</b></div><div><span>POWER FACTOR</span><b>0.998</b></div><div><span>RMS CURRENT</span><b>{(result.outputVoltage / 10_000 * 1000).toFixed(3)} mA</b></div></div><div className="wattmeter-wave"><SignalChart result={result} compact /></div></div>}
-                {activeInstrument === "IV analyzer" && <div className="iv-panel"><div className="instrument-metric-row"><div><span>DEVICE</span><strong>Diode <small>1N4148</small></strong></div><div><span>SWEEP RANGE</span><strong>−1…0.8 <small>V</small></strong></div></div><svg viewBox="0 0 360 108" className="iv-chart"><path d="M30 8v82h320M30 48h320M110 8v82M190 8v82M270 8v82" className="iv-grid" /><path d="M32 48h210q20 0 26-18t10-16 8-3 9-2 12-2 12-1 14-1 17-1" className="iv-curve" fill="none" /><text x="6" y="15">I (mA)</text><text x="326" y="104">V (V)</text></svg><button className="instrument-primary" onClick={() => setToast("IV sweep complete · 81 points captured")}>RUN DEVICE SWEEP <Icon name="play" size={13} /></button></div>}
+                {activeInstrument === "IV analyzer" && <div className="iv-panel"><div className="instrument-metric-row"><div><span>DEVICE</span><strong>{ivDevice}</strong></div><div><span>SWEEP</span><strong>{ivDevice.startsWith("Diode") ? "−1 … 0.9 V" : "0 … 12 V"}</strong></div></div>
+                  <label className="instrument-field">DEVICE UNDER TEST<select value={ivDevice} onChange={(event) => setIvDevice(event.target.value)}><option>Diode · 1N4148</option><option>NPN · 2N3904</option><option>NMOS · 2N7000</option></select></label>
+                  <svg viewBox="0 0 360 150" className="iv-chart">
+                    <path d="M40 8v124h306M40 70h306M118 8v124M196 8v124M274 8v124" className="iv-grid" />
+                    {ivCurves(ivDevice).map((curve) => {
+                      const maximumX = ivDevice.startsWith("Diode") ? 1 : 14;
+                      const maximumY = Math.max(...curve.points.map((point) => Math.abs(point.y)), 1);
+                      const scaleY = ivDevice.startsWith("Diode") ? 1 : 1;
+                      const path = curve.points.map((point, index) => {
+                        const px = 40 + (point.x / maximumX) * 306;
+                        const py = 132 - (point.y / (maximumY * scaleY)) * 124;
+                        return `${index ? "L" : "M"}${px.toFixed(1)} ${py.toFixed(1)}`;
+                      }).join(" ");
+                      return <path key={curve.label} d={path} fill="none" stroke={curve.color} strokeWidth="1.9" strokeLinecap="round" />;
+                    })}
+                    <text x="6" y="16">{ivDevice.startsWith("Diode") ? "I (mA)" : "Ic (mA)"}</text>
+                    <text x="300" y="146">{ivDevice.startsWith("Diode") ? "V (V)" : "Vce (V)"}</text>
+                  </svg>
+                  <div className="iv-legend">{ivCurves(ivDevice).map((curve) => <span key={curve.label}><i style={{ background: curve.color }} />{curve.label}</span>)}</div>
+                  <button className="instrument-primary" onClick={() => setToast(`IV sweep complete · ${ivCurves(ivDevice).length} curves · 80 points each`)}>RUN DEVICE SWEEP <Icon name="play" size={13} /></button>
+                </div>}
               </div>
             </div>}
           </div>
@@ -1260,7 +1410,8 @@ export default function Workbench() {
               {activeDockTab === "Scope" && <div className="scope-dock-content"><div className="scope-channel-legend"><div><i style={{ background: result.traces[0]?.color ?? "#87e84b" }} />{result.traces[0]?.name ?? "V(out)"}<small>CH 1 · DC 5 V</small></div><div className="scope-stat"><span>VOLTAGE</span><strong>{formatVoltage(result.outputVoltage)}</strong></div><div className="scope-stat"><span>TIMEBASE</span><strong>{result.domain === "time" ? "8.0 ms" : result.domain === "frequency" ? "10 Hz – 100 kHz" : "DC"}</strong></div></div><div className="scope-chart-wrap"><SignalChart result={result} progress={progress} /></div><div className="scope-dock-actions"><button className="channel-chip"><i style={{ background: result.traces[0]?.color ?? "#87e84b" }} />CH1 <span>5V</span></button><button className="channel-chip channel-muted" onClick={() => openInstrument("Oscilloscope")}><Icon name="plus" size={12} />CH2</button><button className="dock-measurement" onClick={() => openInstrument("DMM")}><Icon name="target" size={13} /> DMM <b>{formatVoltage(result.outputVoltage)}</b></button></div></div>}
               {activeDockTab === "Netlist" && <div className="netlist-dock-content"><div className="netlist-topline"><div><span className="terminal-prompt">$</span> circuit.sp <span className="netlist-meta">· {document.parts.length} devices · {document.connections.length} connections</span></div><div><button className="dock-small-button" onClick={() => netlistEditable ? applyNetlistDraft() : setNetlistEditable(true)}>{netlistEditable ? "Apply deck" : "Edit netlist"}</button><button className="dock-small-button" onClick={exportSpice}><Icon name="download" size={12} />Export .cir</button></div></div><textarea className="netlist-editor" spellCheck={false} value={netlistEditable ? netlistText : netlist} readOnly={!netlistEditable} onChange={(event) => setNetlistText(event.target.value)} /></div>}
               {activeDockTab === "Console" && <div className="console-dock-content"><div className="console-toolbar"><span><i className="online-dot" /> ENGINE OUTPUT</span><button onClick={() => setConsoleLines([])}>Clear</button></div><div className="console-lines">{consoleLines.map((line, index) => <div key={`${line}-${index}`} className={line.startsWith("ERROR") ? "console-error" : ""}><span>{String(consoleLines.length - index).padStart(2, "0")}</span><code>{line}</code></div>)}{!consoleLines.length && <div className="console-empty">Console cleared · run an analysis to see output.</div>}</div></div>}
-              {activeDockTab === "Analysis" && <div className="analysis-dock-content"><div className="analysis-summary"><div className="analysis-summary-icon"><Icon name="chart" size={18} /></div><div><strong>{analysis === "AC Sweep" ? "Frequency response" : analysis === "DC Sweep" ? "Transfer characteristic" : analysis}</strong><span>{result.status} · {result.sampleCount} points</span></div><span className="analysis-summary-value">{formatVoltage(result.outputVoltage)}</span></div><div className="analysis-chart-wrap"><SignalChart result={result} progress={progress} /></div><div className="analysis-mode-row">{analysisOptions.map((option) => <button key={option.name} className={analysis === option.name ? "active" : ""} onClick={() => setAnalysis(option.name)}><span>{option.eyebrow}</span>{option.name}</button>)}</div></div>}
+              {activeDockTab === "Analysis" && <div className="analysis-dock-content"><div className="analysis-summary"><div className="analysis-summary-icon"><Icon name="chart" size={18} /></div><div><strong>{analysis === "AC Sweep" ? "Frequency response" : analysis === "DC Sweep" ? "Transfer characteristic" : analysis}</strong><span>{result.status} · {result.sampleCount} points</span></div><span className="analysis-summary-value">{formatVoltage(result.outputVoltage)}</span></div><div className="analysis-metrics">{result.metrics && Object.keys(result.metrics).length ? Object.entries(result.metrics).map(([key, value]) => <div key={key}><span>{key.replace(/([A-Z])/g, " $1").toUpperCase()}</span><strong>{typeof value === "number" ? value.toPrecision(4) : value}</strong></div>) : <div><span>SOLVER</span><strong>MNA · {simSettings.method}</strong></div>}<div><span>POINTS</span><strong>{result.sampleCount}</strong></div><div><span>TEMPERATURE</span><strong>{simSettings.temperature} °C</strong></div></div>
+                  <div className="analysis-chart-wrap"><SignalChart result={result} progress={progress} /></div><div className="analysis-mode-row">{analysisOptions.map((option) => <button key={option.name} className={analysis === option.name ? "active" : ""} onClick={() => setAnalysis(option.name)}><span>{option.eyebrow}</span>{option.name}</button>)}</div></div>}
             </div>
           </section>
           <footer className="statusbar"><div><span className="online-dot" />All systems nominal <span className="status-divider" />Autosave on</div><div><span>{tool.kind === "wire" ? connectionStart ? "Select destination pin" : "Select source pin" : tool.kind === "place" ? "Click canvas to place component" : "Ready"}</span><span className="status-divider" /><span>SNAP 20 px</span><span className="status-divider" /><span>XY {pointerWorld ? `${Math.round(pointerWorld.x)}, ${Math.round(pointerWorld.y)}` : "—, —"}</span></div><div><span>SPICE 3f5 compatible</span><span className="status-divider" /><span>{Math.round(zoom * 100)}%</span></div></footer>
@@ -1271,12 +1422,46 @@ export default function Workbench() {
           {selectedPart ? <>
             <div className="inspected-component"><div className={`inspector-component-icon icon-${selectedPart.type}`}><span>{catalog.find((item) => item.type === selectedPart.type)?.tag ?? "•"}</span></div><div><strong>{catalog.find((item) => item.type === selectedPart.type)?.name ?? selectedPart.type}</strong><span>{catalog.find((item) => item.type === selectedPart.type)?.group ?? "Component"}</span></div><button className="icon-button small" onClick={rotateSelected} title="Rotate 90°"><Icon name="rotate" size={14} /></button></div>
             <div className="inspector-section"><div className="inspector-section-title">IDENTIFICATION <span>01</span></div><label className="inspector-field"><span>Reference</span><input value={selectedPart.ref} onChange={(event) => setPartProperty(selectedPart.id, "ref", event.target.value)} /></label><label className="inspector-field"><span>Value</span><div className="input-with-unit"><input value={selectedPart.value} onChange={(event) => setPartProperty(selectedPart.id, "value", event.target.value)} /><span>{selectedPart.type === "resistor" || selectedPart.type === "potentiometer" ? "Ω" : selectedPart.type === "capacitor" ? "F" : selectedPart.type === "inductor" ? "H" : ""}</span></div></label><div className="inspector-readonly"><span>Footprint</span><span>{selectedPart.type === "ground" ? "—" : selectedPart.type === "resistor" ? "R_0603 · THT" : "Generic · 2 pin"}</span></div><div className="inspector-readonly"><span>Rotation</span><span>{selectedPart.rotation}°</span></div></div>
+            {(selectedPart.type === "potentiometer" || selectedPart.type === "switch" || selectedPart.type === "relay" || selectedPart.type === "fuse") && (
+              <div className="inspector-section interactive-section">
+                <div className="inspector-section-title">INTERACTIVE CONTROL <span className="live-tag">LIVE</span></div>
+                {selectedPart.type === "potentiometer" ? (
+                  <label className="inspector-field">
+                    <span>Wiper position · {Math.round((selectedPart.position ?? 0.5) * 100)} %</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={Math.round((selectedPart.position ?? 0.5) * 100)}
+                      onChange={(event) => applyInteractive(selectedPart.id, { position: Number(event.target.value) / 100 }, `Wiper auf ${event.target.value} % gesetzt`)}
+                    />
+                  </label>
+                ) : (
+                  <button className="interactive-toggle" onClick={() => applyInteractive(selectedPart.id, { closed: !selectedPart.closed }, `${selectedPart.ref} ${selectedPart.closed ? "geöffnet" : "geschlossen"}`)}>
+                    <span className={`switch-state${selectedPart.closed ? " on" : ""}`} />
+                    {selectedPart.closed ? "Geschlossen · leitet" : "Offen · sperrt"}
+                  </button>
+                )}
+                <div className="tolerance-hint"><Icon name="spark" size={13} />Änderungen simulieren sofort neu</div>
+              </div>
+            )}
             {selectedPart.type === "resistor" || selectedPart.type === "capacitor" || selectedPart.type === "inductor" ? <div className="inspector-section"><div className="inspector-section-title">TOLERANCE & VARIATION <span>02</span></div><label className="inspector-field"><span>Tolerance</span><div className="input-with-unit"><input value={selectedPart.tolerance ?? (selectedPart.type === "resistor" ? "5%" : "10%")} onChange={(event) => setPartProperty(selectedPart.id, "tolerance", event.target.value)} /><span>±</span></div></label><label className="inspector-field"><span>Temp. coefficient</span><input value={selectedPart.tempCoeff ?? "—"} onChange={(event) => setPartProperty(selectedPart.id, "tempCoeff", event.target.value)} /></label><div className="tolerance-hint"><Icon name="spark" size={13} />Used by Monte Carlo analysis</div></div> : null}
             <div className="inspector-section model-section"><button className="inspector-section-title model-toggle" onClick={() => setShowAdvanced((open) => !open)}>SPICE MODEL <span>{showAdvanced ? "−" : "+"}</span></button>{showAdvanced && <pre className="spice-model">{selectedPart.type === "resistor" ? `${selectedPart.ref} N001 0 ${selectedPart.value.replace(/[Ω\s]/g, "")}` : selectedPart.type === "diode" || selectedPart.type === "led" ? `.model ${selectedPart.ref} D(IS=2.52n N=1.75)` : `* ${selectedPart.ref} ${selectedPart.value}\n* Generic model · editable`}</pre>}<button className="model-edit-link" onClick={() => { setActiveDockTab("Netlist"); setNetlistEditable(true); }}>Open in netlist editor <Icon name="chevronRight" size={12} /></button></div>
             <div className="inspector-footer-actions"><button className="icon-button small" title="Duplicate" onClick={() => { const original = selectedPart; const duplicate = { ...original, id: makeId(original.ref.toLowerCase()), ref: `${original.ref.replace(/[0-9]/g, "")}${document.parts.filter((part) => part.ref.startsWith(original.ref.replace(/[0-9]/g, ""))).length + 1}`, x: original.x + 80, y: original.y + 60 }; updateCircuit((current) => ({ ...current, parts: [...current.parts, duplicate] })); setSelectedPartId(duplicate.id); }}><Icon name="copy" size={14} />Duplicate</button><button className="icon-button small delete-action" onClick={removeSelectedPart} title="Delete component"><Icon name="trash" size={14} />Delete</button></div>
           </> : <>
             <div className="design-summary-card"><div className="design-summary-top"><div className="design-summary-icon"><Icon name="component" size={17} /></div><div><strong>RC low-pass filter</strong><span>Passive · 1st order</span></div><span className="ready-pill"><i />READY</span></div><div className="design-summary-stats"><div><strong>{document.parts.length}</strong><span>PARTS</span></div><div><strong>{document.connections.length}</strong><span>WIRES</span></div><div><strong>{document.probes.length}</strong><span>PROBES</span></div></div></div>
-            <div className="inspector-section"><div className="inspector-section-title">ANALYSIS SETUP <span>01</span></div><label className="inspector-field"><span>Analysis mode</span><select value={analysis} onChange={(event) => setAnalysis(event.target.value as AnalysisMode)}>{analysisOptions.map((option) => <option key={option.name}>{option.name}</option>)}</select></label><label className="inspector-field"><span>Temperature</span><div className="input-with-unit"><input defaultValue="27" /><span>°C</span></div></label><label className="inspector-field"><span>Max timestep</span><div className="input-with-unit"><input defaultValue="10" /><span>µs</span></div></label><label className="inspector-checkbox"><input type="checkbox" defaultChecked /><span>Adaptive timestep control</span></label></div>
+            <div className="inspector-section"><div className="inspector-section-title">ANALYSIS SETUP <span>01</span></div><label className="inspector-field"><span>Analysis mode</span><select value={analysis} onChange={(event) => setAnalysis(event.target.value as AnalysisMode)}>{analysisOptions.map((option) => <option key={option.name}>{option.name}</option>)}</select></label>
+              <label className="inspector-field"><span>Integration method</span><select value={simSettings.method} onChange={(event) => setSimSettings((current) => ({ ...current, method: event.target.value as IntegrationMethod }))}><option>Trapezoidal</option><option>Backward Euler</option><option>Gear 2</option></select></label>
+              <div className="settings-grid">
+                <label className="inspector-field"><span>Stop time</span><div className="input-with-unit"><input type="number" min="1" step="1" value={Math.round(simSettings.duration * 1000)} onChange={(event) => setSimSettings((current) => ({ ...current, duration: Math.max(0.0001, Number(event.target.value) / 1000) }))} /><span>ms</span></div></label>
+                <label className="inspector-field"><span>Max step</span><div className="input-with-unit"><input type="number" min="0.1" step="0.5" value={Math.round(simSettings.timestep * 1e6)} onChange={(event) => setSimSettings((current) => ({ ...current, timestep: Math.max(1e-9, Number(event.target.value) / 1e6) }))} /><span>µs</span></div></label>
+                <label className="inspector-field"><span>Temperature</span><div className="input-with-unit"><input type="number" step="5" value={simSettings.temperature} onChange={(event) => setSimSettings((current) => ({ ...current, temperature: Number(event.target.value) }))} /><span>°C</span></div></label>
+                <label className="inspector-field"><span>Points</span><div className="input-with-unit"><input type="number" min="24" max="400" step="12" value={analysisPoints} onChange={(event) => setAnalysisPoints(Math.max(24, Math.min(400, Number(event.target.value))))} /><span>pts</span></div></label>
+              </div>
+              {analysis === "Parameter Sweep" && <label className="inspector-field"><span>Sweep component</span><select value={parameterTarget ?? ""} onChange={(event) => setParameterTarget(event.target.value || undefined)}><option value="">First R / L / C</option>{document.parts.filter((part) => ["resistor", "capacitor", "inductor", "voltage"].includes(part.type)).map((part) => <option key={part.id} value={part.id}>{part.ref} · {part.value}</option>)}</select></label>}
+              <label className="inspector-checkbox"><input type="checkbox" checked={simSettings.gminStepping} onChange={(event) => setSimSettings((current) => ({ ...current, gminStepping: event.target.checked }))} /><span>GMIN stepping & source ramping</span></label>
+              <div className="solver-hint"><Icon name="target" size={13} />MNA · Newton-Raphson · {simSettings.method}</div>
+            </div>
             <div className="inspector-section"><div className="inspector-section-title">MEASUREMENTS <span>{document.probes.length}</span></div>{document.probes.map((probe) => <div className="inspector-probe" key={probe.id}><span className="probe-icon"><Icon name="probe" size={13} /></span><span>{probe.name}<small>{document.parts.find((part) => part.id === probe.pin.partId)?.ref ?? "—"} · pin {probe.pin.pin + 1}</small></span><b>{formatVoltage(result.outputVoltage)}</b></div>)}<button className="add-probe-button" onClick={() => setTool({ kind: "probe" })}><Icon name="plus" size={13} />Add voltage probe</button></div>
           </>}
           <div className="instrument-shortcuts"><div className="inspector-section-title">INSTRUMENTS <button className="text-button" onClick={() => openInstrument("Oscilloscope")}>Open all</button></div><div className="instrument-shortcut-grid">{(["DMM", "Oscilloscope", "Function generator", "Bode plotter", "Logic analyzer", "Wattmeter", "IV analyzer"] as InstrumentName[]).map((instrument) => <button key={instrument} onClick={() => openInstrument(instrument)}><span className={`shortcut-icon shortcut-${instrument.toLowerCase().replaceAll(" ", "-")}`}><Icon name={instrument === "DMM" ? "target" : instrument === "Oscilloscope" ? "scope" : instrument === "Function generator" ? "waveform" : instrument === "Bode plotter" ? "chart" : instrument === "Logic analyzer" ? "logic" : instrument === "Wattmeter" ? "bolt" : "diode"} size={14} /></span>{instrument}</button>)}</div></div>
